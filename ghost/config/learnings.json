@@ -1,0 +1,37 @@
+{
+  "instruments": {
+    "MES": {
+      "blocked_regimes": []
+    },
+    "MGC": {
+      "blocked_regimes": []
+    },
+    "MNQ": {
+      "blocked_regimes": []
+    },
+    "SIL": {
+      "blocked_regimes": []
+    }
+  },
+  "sessions": {
+    "LONDON": {
+      "win_rate": 1.0,
+      "trades": 1,
+      "tqs_bonus": 12
+    },
+    "NY": {
+      "win_rate": 0.0,
+      "trades": 1
+    }
+  },
+  "global_adjustments": {
+    "total_trades": 26,
+    "win_rate": 0.654,
+    "avg_win": 324.63,
+    "avg_loss": -348.61,
+    "total_pnl": 2381.25
+  },
+  "pass_number": 5,
+  "source_win_rate": 0.6538461538461539,
+  "source_trades": 26
+}

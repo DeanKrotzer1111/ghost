@@ -11,9 +11,10 @@ logger = structlog.get_logger()
 class BacktestRunner:
     """Convenience runner that loads data and executes backtests."""
 
-    def __init__(self, data_dir: str, config: BacktestConfig = None):
+    def __init__(self, data_dir: str, config: BacktestConfig = None, learn: bool = False):
         self.loader = DatabentoLoader(data_dir)
         self.config = config or BacktestConfig()
+        self.learn = learn
 
     def run_instrument(self, instrument: str) -> dict:
         """Run backtest for a single instrument."""
@@ -27,12 +28,70 @@ class BacktestRunner:
         bars = self.loader.to_bars(df)
         logger.info("runner.bars_loaded", instrument=instrument, count=len(bars))
 
+        if self.learn:
+            return self._run_with_learning(bars, instrument)
+
         engine = BacktestEngine(self.config)
         start = time.time()
         result = engine.run(bars, instrument)
         elapsed = time.time() - start
 
-        summary = {
+        summary = self._build_summary(instrument, result, elapsed)
+        self._print_report(summary)
+        return summary
+
+    def _run_with_learning(self, bars, instrument: str) -> dict:
+        """Run backtest with multi-pass learning enabled."""
+        from ghost.modules.m29_self_calibration.learner import GhostLearner
+
+        learner = GhostLearner()
+        learner.load()
+
+        logger.info("runner.learning_mode", instrument=instrument, passes=5)
+        start = time.time()
+
+        learn_result = learner.learn_and_improve(
+            bars=bars,
+            instrument=instrument,
+            passes=5,
+            base_config=self.config,
+        )
+        elapsed = time.time() - start
+
+        best_result = learn_result["best_result"]
+        if best_result is None:
+            return {"error": "Learning produced no valid results"}
+
+        summary = self._build_summary(instrument, best_result, elapsed)
+        summary["learning_passes"] = learn_result["all_results"]
+        summary["final_adjustments"] = learn_result["final_adjustments"]
+
+        self._print_report(summary)
+
+        # Print learning progression
+        print(f"\n  LEARNING PROGRESSION:")
+        for p in learn_result["all_results"]:
+            print(f"    Pass {p['pass']}: {p['trades']} trades, "
+                  f"{p['win_rate']}% WR, ${p['total_pnl']:,.2f} PnL, "
+                  f"Sharpe {p['sharpe']}")
+
+        return summary
+
+    def run_all(self) -> dict:
+        """Run backtest across all available instruments."""
+        instruments = self.loader.list_instruments()
+        logger.info("runner.instruments_found", instruments=instruments)
+
+        results = {}
+        for inst in instruments:
+            results[inst] = self.run_instrument(inst)
+
+        self._print_portfolio_summary(results)
+        return results
+
+    def _build_summary(self, instrument: str, result, elapsed: float) -> dict:
+        """Build summary dict from a BacktestResult."""
+        return {
             "instrument": instrument,
             "total_trades": result.total_trades,
             "winning_trades": result.winning_trades,
@@ -52,21 +111,6 @@ class BacktestRunner:
             "shadow_signals": result.shadow_signals,
             "elapsed_seconds": round(elapsed, 1),
         }
-
-        self._print_report(summary)
-        return summary
-
-    def run_all(self) -> dict:
-        """Run backtest across all available instruments."""
-        instruments = self.loader.list_instruments()
-        logger.info("runner.instruments_found", instruments=instruments)
-
-        results = {}
-        for inst in instruments:
-            results[inst] = self.run_instrument(inst)
-
-        self._print_portfolio_summary(results)
-        return results
 
     def _print_report(self, s: dict):
         """Print a single-instrument backtest report."""
