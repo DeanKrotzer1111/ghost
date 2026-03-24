@@ -1,0 +1,63 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.crt
+credentials.json
+secrets.json
+*_secret*
+*_api_key*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# Database
+*.db
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Model weights
+*.pt
+*.pth
+*.onnx
+*.bin
+models/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+Thumbs.db
+ghost_prd_v55_complete.md
