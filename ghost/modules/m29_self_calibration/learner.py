@@ -321,40 +321,55 @@ class GhostLearner:
             "global_adjustments": self.adjustments.global_adjustments,
         }
 
-    def _tune_config(self, config, trades: list) -> None:
-        """Tune config parameters based on trade analysis between passes."""
+    def _tune_config(self, config, trades: list, pass_num: int = 1) -> None:
+        """Aggressively tune config parameters based on trade analysis between passes."""
         if not trades:
             return
 
         wins = [t for t in trades if t.pnl > 0]
         losses = [t for t in trades if t.pnl <= 0]
         wr = len(wins) / len(trades) if trades else 0
-
-        # If WR is low, tighten premium/discount to only take best setups
-        if wr < 0.50 and len(trades) >= 5:
-            config.premium_discount_long_max = max(0.30, config.premium_discount_long_max - 0.05)
-            config.premium_discount_short_min = min(0.70, config.premium_discount_short_min + 0.05)
-
-        # If WR is high but we're not taking enough trades, relax
-        if wr >= 0.65 and len(trades) < 10:
-            config.premium_discount_long_max = min(0.50, config.premium_discount_long_max + 0.05)
-            config.premium_discount_short_min = max(0.50, config.premium_discount_short_min - 0.05)
-
-        # If too many stop losses, widen stops slightly
         stop_losses = [t for t in trades if t.outcome == "LOSS_STOP"]
-        if len(stop_losses) > len(trades) * 0.40:
-            config.stop_multiplier = min(3.0, config.stop_multiplier + 0.25)
+        stop_pct = len(stop_losses) / len(trades) if trades else 0
 
-        # If WR is very high, try raising confluence to filter even more
-        if wr >= 0.70 and len(trades) >= 5:
-            config.confluence_minimum = min(0.60, config.confluence_minimum + 0.05)
+        # Each pass tries a different strategy variation
+        if pass_num == 2:
+            # Pass 2: Tighten entry quality, widen stops
+            config.premium_discount_long_max = 0.35
+            config.premium_discount_short_min = 0.65
+            config.stop_multiplier = min(3.0, config.stop_multiplier + 0.5)
+            config.confluence_minimum = min(0.50, config.confluence_minimum + 0.10)
 
-        # If most wins are small relative to losses, increase TP1 ratio
-        if wins and losses:
-            avg_win = np.mean([t.pnl for t in wins])
-            avg_loss = abs(np.mean([t.pnl for t in losses]))
-            if avg_loss > 0 and avg_win / avg_loss < 0.8:
-                config.tp1_ratio = min(4.0, config.tp1_ratio + 0.5)
+        elif pass_num == 3:
+            # Pass 3: Maximize selectivity — only best setups
+            config.premium_discount_long_max = 0.30
+            config.premium_discount_short_min = 0.70
+            config.require_kill_zone = True
+            config.confluence_minimum = 0.45
+            config.tp1_ratio = 1.5  # Easier TP
+
+        elif pass_num == 4:
+            # Pass 4: Wider stops + wider TPs, trade fewer but hold longer
+            config.stop_multiplier = 2.5
+            config.tp1_ratio = 3.0
+            config.tp2_ratio = 4.5
+            config.require_kill_zone = False
+            config.premium_discount_long_max = 0.40
+            config.confluence_minimum = 0.35
+
+        elif pass_num == 5:
+            # Pass 5: Use learnings from best previous pass + aggressive filtering
+            if wr < 0.50:
+                config.require_trending = True
+                config.require_1h_structure = True
+                config.premium_discount_long_max = 0.35
+            if stop_pct > 0.40:
+                config.stop_multiplier = min(3.0, config.stop_multiplier + 0.75)
+            if wins and losses:
+                avg_win = np.mean([t.pnl for t in wins])
+                avg_loss = abs(np.mean([t.pnl for t in losses]))
+                if avg_loss > 0 and avg_win / avg_loss < 1.0:
+                    config.tp1_ratio = max(1.5, config.tp1_ratio - 0.5)  # Easier targets
 
     def learn_and_improve(self, bars: list, instrument: str, passes: int = 5,
                           base_config=None) -> dict:
@@ -425,7 +440,7 @@ class GhostLearner:
                 current_adjustments = self.get_adjustments_dict()
 
                 # Tune config parameters for next pass
-                self._tune_config(evolving_config, result.trades)
+                self._tune_config(evolving_config, result.trades, pass_num=p + 2)
 
         # Save final learnings
         self.save()
