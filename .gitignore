@@ -58,6 +58,10 @@ models/
 # Jupyter
 .ipynb_checkpoints/
 
+# Market data (Databento downloads)
+GLBX-*/
+*.csv.zst
+
 # OS
 Thumbs.db
 ghost_prd_v55_complete.md

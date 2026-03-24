@@ -26,6 +26,7 @@ transformers>=4.36.0
 # Data
 databento>=0.30.0
 pandas>=2.1.0
+zstandard>=0.22.0
 
 # HTTP
 httpx>=0.25.0
