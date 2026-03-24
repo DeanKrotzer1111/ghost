@@ -3,7 +3,7 @@
 > **Win In Silence** — A production-grade, multi-model AI trading system that autonomously identifies, validates, and executes futures trades across 30 CME instruments using institutional order flow analysis, ensemble LLM consensus, and adaptive self-calibration.
 
 **Developer:** Dean Krotzer
-**Stack:** Python 3.11+ | FastAPI | PostgreSQL | Redis | MiniMax 2.5 | Qwen 3.5-35B (MLX) | Claude Sonnet | Apple M4 Max 128GB
+**Stack:** Python 3.11+ | FastAPI | Claude Agent SDK | PostgreSQL | Redis | MiniMax 2.5 | Qwen 3.5-35B (MLX) | Claude Sonnet | Apple M4 Max 128GB
 
 ---
 
@@ -32,6 +32,96 @@ Signal → [MTF Pyramid] → [Weekly Profile] → [Footprint Detection] → [Liq
 │  OFD Engine │  Ensemble   │  Stop Calib │  Dynamic TP/SL           │
 └─────────────┴─────────────┴─────────────┴──────────────────────────┘
 ```
+
+---
+
+## Claude Agent SDK Dispatch
+
+Ghost integrates the **Claude Agent SDK** for autonomous agent orchestration. Specialized Claude agents handle different aspects of the trading pipeline — from market analysis to risk management — coordinated through a natural language dispatch interface.
+
+### Dispatch Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    GHOST DISPATCHER                           │
+│              (Claude Agent SDK Orchestration)                 │
+├──────────────┬───────────────┬───────────────┬───────────────┤
+│   MARKET     │    SIGNAL     │     RISK      │  CALIBRATION  │
+│   ANALYST    │   PROCESSOR   │    MANAGER    │    AGENT      │
+│              │               │               │               │
+│  Scan instr  │  10-gate eval │  Portfolio    │  Weekly       │
+│  Regime det  │  TQS scoring  │  Payout phase │  recalibrate  │
+│  Weekly prof │  Ensemble LLM │  Position size│  Shadow review│
+└──────────────┴───────────────┴───────────────┴───────────────┘
+         ▼              ▼               ▼               ▼
+    14 Custom MCP Tools (in-process, zero subprocess overhead)
+```
+
+### Quick Start — Dispatch CLI
+
+```bash
+# Full trading session with coordinated agents
+ghost-dispatch session "Scan MNQ and ES for setups during London kill zone"
+
+# Market analysis only
+ghost-dispatch analyze "Check NQ regime and weekly profile alignment"
+
+# Process a specific signal through all 10 gates
+ghost-dispatch signal "Evaluate BULLISH MNQ signal at FVG 21450-21475"
+
+# Risk check before execution
+ghost-dispatch risk "Check portfolio risk and payout phase for topstep_50k"
+
+# Weekly recalibration
+ghost-dispatch calibrate "Run weekly calibration and report all parameter changes"
+
+# System health check
+ghost-dispatch health "Check all Ghost services"
+```
+
+### Python API
+
+```python
+import asyncio
+from ghost.dispatch import GhostDispatcher
+
+async def main():
+    dispatcher = GhostDispatcher()
+
+    # Run a full trading session with 3 coordinated agents
+    async for result in dispatcher.run_session(
+        "Scan all equity index futures for high-TQS setups"
+    ):
+        print(result)
+
+    # Or dispatch individual specialist agents
+    async for result in dispatcher.analyze_market("NQ regime check"):
+        print(result)
+
+    async for result in dispatcher.manage_risk("Check payout phase"):
+        print(result)
+
+asyncio.run(main())
+```
+
+### Custom MCP Tools (14 tools, in-process)
+
+| Tool | Description |
+|------|-------------|
+| `scan_instruments` | Scan all 30 CME instruments for active signals |
+| `analyze_regime` | Market regime detection (trending/ranging/volatile) |
+| `check_weekly_profile` | Weekly bias classification |
+| `evaluate_signal` | Full 10-gate signal pipeline evaluation |
+| `run_tqs_score` | Trade Quality Score calculation (0-100) |
+| `run_checklist` | 21-condition pre-signal checklist |
+| `run_ensemble` | Dual-LLM multi-temperature consensus vote |
+| `check_payout_state` | Funded account payout phase and risk params |
+| `calculate_position_size` | Kelly criterion position sizing |
+| `check_portfolio` | Current positions, P&L, risk utilization |
+| `run_calibration` | Weekly stop/TP parameter recalibration |
+| `query_trade_history` | Historical trade analysis |
+| `get_shadow_signals` | TQS 80-84 shadow signal review |
+| `system_health` | Service health check across all components |
 
 ---
 
@@ -105,6 +195,7 @@ Signal → [MTF Pyramid] → [Weekly Profile] → [Footprint Detection] → [Liq
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | **Runtime** | Python 3.11+ | Async-first with `asyncio` and `asyncpg` |
+| **Agent Dispatch** | Claude Agent SDK | Autonomous agent orchestration with custom MCP tools |
 | **API** | FastAPI | REST API with automatic OpenAPI docs |
 | **Database** | PostgreSQL | Trade history, calibration data, shadow signals |
 | **Cache** | Redis | Real-time state, rate limiting, session data |
@@ -157,6 +248,11 @@ ghost/
 │   ├── m27_payout/              # [v5.5] Funded account payout mgr
 │   ├── m28_ensemble/            # [v5.5] Ensemble LLM voting
 │   └── m29_self_calibration/    # [v5.5] Weekly auto-recalibration
+├── dispatch/
+│   ├── __init__.py              # Dispatch module exports
+│   ├── tools.py                 # 14 custom MCP tools for Claude agents
+│   ├── agents.py                # 4 specialized agent definitions + dispatcher
+│   └── cli.py                   # ghost-dispatch CLI entry point
 ├── db/
 │   └── migrations/
 │       └── v55_additions.sql    # v5.5 schema additions
