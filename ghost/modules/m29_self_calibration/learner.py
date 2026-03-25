@@ -6,6 +6,7 @@ After each backtest run, the learner:
   3. Generates per-instrument and per-session adjustments
   4. Persists learnings to JSON for the next run
   5. Multi-pass learning: iterates backtest N times, improving each pass
+  6. Tracks performance history across runs for improvement visibility
 """
 import json
 import os
@@ -15,6 +16,7 @@ import numpy as np
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Optional, Any
 from collections import defaultdict
+from datetime import datetime, timezone
 
 logger = structlog.get_logger()
 
@@ -69,9 +71,10 @@ class GhostLearner:
         self.adjustments = CalibrationAdjustments()
         self._trade_groups: Dict[str, TradeGroupStats] = {}
         self._log = logger.bind(component="GhostLearner")
+        self._performance_history: List[Dict[str, Any]] = []
 
     def load(self) -> CalibrationAdjustments:
-        """Load persisted learnings from JSON."""
+        """Load persisted learnings from JSON, including performance history."""
         if os.path.exists(self.learnings_path):
             try:
                 with open(self.learnings_path, "r") as f:
@@ -84,15 +87,18 @@ class GhostLearner:
                     source_win_rate=data.get("source_win_rate", 0.0),
                     source_trades=data.get("source_trades", 0),
                 )
+                self._performance_history = data.get("performance_history", [])
                 self._log.info("learnings_loaded", path=self.learnings_path,
-                               instruments=len(self.adjustments.instruments))
+                               instruments=len(self.adjustments.instruments),
+                               history_entries=len(self._performance_history))
             except (json.JSONDecodeError, Exception) as e:
                 self._log.warning("learnings_load_failed", error=str(e))
                 self.adjustments = CalibrationAdjustments()
+                self._performance_history = []
         return self.adjustments
 
     def save(self) -> None:
-        """Persist learnings to JSON."""
+        """Persist learnings to JSON, including performance history."""
         os.makedirs(os.path.dirname(self.learnings_path), exist_ok=True)
         data = {
             "instruments": self.adjustments.instruments,
@@ -101,10 +107,88 @@ class GhostLearner:
             "pass_number": self.adjustments.pass_number,
             "source_win_rate": self.adjustments.source_win_rate,
             "source_trades": self.adjustments.source_trades,
+            "performance_history": self._performance_history,
         }
         with open(self.learnings_path, "w") as f:
             json.dump(data, f, indent=2)
-        self._log.info("learnings_saved", path=self.learnings_path)
+        self._log.info("learnings_saved", path=self.learnings_path,
+                       history_entries=len(self._performance_history))
+
+    def record_run(self, instrument: str, result, config=None) -> None:
+        """Record a backtest run's results to performance history.
+
+        Args:
+            instrument: Instrument symbol.
+            result: BacktestResult from a completed run.
+            config: Optional BacktestConfig used for the run.
+        """
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "instrument": instrument,
+            "total_trades": result.total_trades,
+            "winning_trades": result.winning_trades,
+            "losing_trades": result.losing_trades,
+            "win_rate": round(result.win_rate, 4),
+            "total_pnl": round(result.total_pnl, 2),
+            "sharpe_ratio": round(result.sharpe_ratio, 3),
+            "profit_factor": round(result.profit_factor, 3),
+            "max_drawdown": round(result.max_drawdown, 2),
+            "final_balance": round(result.final_balance, 2),
+        }
+        if config is not None:
+            entry["config_snapshot"] = {
+                "min_risk_ticks": config.min_risk_ticks,
+                "stop_multiplier": round(config.stop_multiplier, 2),
+                "tp1_ratio": round(config.tp1_ratio, 2),
+                "confluence_minimum": round(config.confluence_minimum, 2),
+                "tqs_minimum": config.tqs_minimum,
+                "loss_cooloff_bars": config.loss_cooloff_bars,
+            }
+        self._performance_history.append(entry)
+        self._log.info("run_recorded", instrument=instrument,
+                       win_rate=entry["win_rate"],
+                       total_pnl=entry["total_pnl"],
+                       history_size=len(self._performance_history))
+
+    def apply_learnings_to_config(self, config, instrument: str) -> None:
+        """Apply persisted per-instrument optimal parameters to a config.
+
+        Reads the instrument adjustments from the loaded learnings and applies
+        them to the config object in-place.
+
+        Args:
+            config: BacktestConfig to modify.
+            instrument: Instrument symbol.
+        """
+        adj = self.adjustments.instruments.get(instrument, {})
+        if not adj:
+            return
+
+        # Apply stop multiplier if learned
+        if "stop_multiplier" in adj:
+            config.stop_multiplier = adj["stop_multiplier"]
+            self._log.info("learnings_applied", instrument=instrument,
+                           param="stop_multiplier", value=adj["stop_multiplier"])
+
+        # Apply TQS bonus via instrument_overrides
+        if "tqs_bonus" in adj:
+            if config.instrument_overrides is None:
+                config.instrument_overrides = {}
+            if instrument not in config.instrument_overrides:
+                config.instrument_overrides[instrument] = {}
+            config.instrument_overrides[instrument]["tqs_bonus"] = adj["tqs_bonus"]
+
+        # Apply blocked instruments if regime analysis says to skip
+        blocked_regimes = adj.get("blocked_regimes", [])
+        if blocked_regimes:
+            self._log.info("learnings_applied", instrument=instrument,
+                           param="blocked_regimes", value=blocked_regimes)
+
+    def get_performance_history(self, instrument: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return performance history, optionally filtered by instrument."""
+        if instrument is None:
+            return list(self._performance_history)
+        return [e for e in self._performance_history if e.get("instrument") == instrument]
 
     def analyze(self, trades: list, instrument: str = "") -> CalibrationAdjustments:
         """Analyze completed trades and generate calibration adjustments.
@@ -389,6 +473,10 @@ class GhostLearner:
         if base_config is None:
             base_config = BacktestConfig()
 
+        # Load previous learnings and apply to base config
+        self.load()
+        self.apply_learnings_to_config(base_config, instrument)
+
         best_sharpe = -999.0
         best_wr = 0.0
         best_config = copy.deepcopy(base_config)
@@ -423,6 +511,9 @@ class GhostLearner:
 
             self._log.info("learn_pass_result", **pass_info)
 
+            # Record each pass to performance history
+            self.record_run(instrument, result, config)
+
             # Track best using composite score: WR * trade_count + Sharpe
             if result.total_trades >= 3:
                 score = result.win_rate * 100 + result.sharpe_ratio * 5
@@ -442,7 +533,7 @@ class GhostLearner:
                 # Tune config parameters for next pass
                 self._tune_config(evolving_config, result.trades, pass_num=p + 2)
 
-        # Save final learnings
+        # Save final learnings (includes per-instrument params + performance history)
         self.save()
 
         return {

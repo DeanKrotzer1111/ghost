@@ -100,6 +100,7 @@ class BacktestConfig:
     max_hold_bars: int = 300           # Close stale trades after 5 hours
     breakeven_after_bars: int = 120    # Move stop to breakeven after 2 hours
     bullish_only: bool = False         # Only take bullish trades (for bull markets)
+    instrument_overrides: dict = None   # Per-instrument config overrides
 
 
 @dataclass
@@ -226,6 +227,11 @@ class BacktestEngine:
 
         # ATR history for percentile filter
         self._atr_history: List[float] = []
+
+    def _get_instrument_config(self, instrument: str, key: str, default):
+        """Get a config value with per-instrument overrides applied."""
+        overrides = self.config.instrument_overrides or {}
+        return overrides.get(instrument, {}).get(key, default)
 
     def _get_effective_stop_multiplier(self, instrument: str) -> float:
         """Get stop multiplier, applying learner adjustments if present."""
@@ -586,7 +592,10 @@ class BacktestEngine:
 
             # v7.0 FIX 1: Reject micro-risk trades — stops too close = noise
             risk_ticks = original_risk / tick
-            if risk_ticks < self.config.min_risk_ticks:
+            effective_min_risk_ticks = self._get_instrument_config(
+                instrument, "min_risk_ticks", self.config.min_risk_ticks
+            )
+            if risk_ticks < effective_min_risk_ticks:
                 signals_rejected += 1
                 continue
 
