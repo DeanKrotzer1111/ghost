@@ -89,6 +89,17 @@ class BacktestConfig:
     premium_discount_short_min: float = 0.60  # Shorts only in premium zone
     require_fvg_15m: bool = True       # Require 15m+ FVG
     require_1h_structure: bool = True  # Require 1H structure alignment
+    # v7.0 — Quality over quantity
+    min_risk_ticks: int = 10           # Reject micro-risk trades (noise)
+    max_one_position: bool = True      # Only 1 position open at a time (no dupes)
+    macro_trend_filter: bool = True    # Only trade WITH the 4H macro trend
+    min_rr_ratio: float = 2.0         # Min reward:risk ratio (TP1 must be >= 2x risk)
+    loss_cooloff_bars: int = 120       # Wait 2 hours after a loss before next trade
+    blocked_instruments: list = None   # Instruments to skip entirely
+    # v7.5 — Time management
+    max_hold_bars: int = 300           # Close stale trades after 5 hours
+    breakeven_after_bars: int = 120    # Move stop to breakeven after 2 hours
+    bullish_only: bool = False         # Only take bullish trades (for bull markets)
 
 
 @dataclass
@@ -210,6 +221,7 @@ class BacktestEngine:
         self.daily_pnl = 0.0
         self.current_day = None
         self.consecutive_losses = 0
+        self.last_loss_bar = -9999  # v7.0: cooloff tracking
         self.trades_today: int = 0  # v6.0: per-day trade counter
 
         # ATR history for percentile filter
@@ -240,6 +252,12 @@ class BacktestEngine:
     def run(self, bars_1m: List[Bar], instrument: str) -> BacktestResult:
         """Run backtest on 1-minute bars for a single instrument."""
         self.signal_generator = SignalGenerator(instrument=instrument)
+
+        # v7.0: Skip blocked instruments entirely
+        blocked = self.config.blocked_instruments or []
+        if instrument in blocked:
+            logger.info("backtest.instrument_blocked", instrument=instrument)
+            return BacktestResult(trades=[], final_balance=self.balance)
 
         if len(bars_1m) < self.config.min_bars_warmup:
             logger.warning("insufficient_bars", count=len(bars_1m), required=self.config.min_bars_warmup)
@@ -273,6 +291,56 @@ class BacktestEngine:
             # 1. Monitor open positions
             closed_positions = []
             for pos in self.open_positions:
+                bars_held = i - getattr(pos, "_entry_bar_idx", i)
+
+                # v7.5: Move stop to breakeven after N bars
+                if (self.config.breakeven_after_bars > 0
+                        and bars_held >= self.config.breakeven_after_bars
+                        and not getattr(pos, "_breakeven_set", False)):
+                    if pos.direction == "BULLISH" and pos.stop < pos.entry:
+                        pos.stop = pos.entry + tick  # breakeven + 1 tick
+                        pos._breakeven_set = True
+                    elif pos.direction == "BEARISH" and pos.stop > pos.entry:
+                        pos.stop = pos.entry - tick
+                        pos._breakeven_set = True
+
+                # v7.5: Force close stale trades after max hold
+                if self.config.max_hold_bars > 0 and bars_held >= self.config.max_hold_bars:
+                    from ghost.modules.m08_monitor.monitor import MonitorAction
+                    exit_price = current_bar.close
+                    pnl = self._calc_pnl(pos, exit_price, tick, pv)
+                    pos.pnl = pnl
+                    pos.status = "CLOSED"
+                    self.balance += pnl
+                    self.daily_pnl += pnl
+                    if pnl <= 0:
+                        self.consecutive_losses += 1
+                        self.last_loss_bar = i
+                    else:
+                        self.consecutive_losses = 0
+                    bt_trade = BacktestTrade(
+                        trade_id=pos.id, instrument=instrument, direction=pos.direction,
+                        entry_price=pos.entry, exit_price=exit_price, stop=pos.stop,
+                        tp1=pos.tp1, tp2=pos.tp2, tp3=pos.tp3, contracts=pos.contracts,
+                        pnl=pnl, outcome="WIN_TIME" if pnl > 0 else "LOSS_TIME",
+                        tqs_score=getattr(pos, "_tqs_score", 0),
+                        tqs_grade=getattr(pos, "_tqs_grade", ""),
+                        confluence_score=getattr(pos, "_confluence", 0),
+                        entry_time=pos.entry_time, exit_time=current_bar.timestamp,
+                        bars_held=bars_held,
+                        regime_label=getattr(pos, "_regime_label", ""),
+                        kill_zone=getattr(pos, "_kill_zone", ""),
+                    )
+                    trades.append(bt_trade)
+                    self.journal.record(JournalEntry(
+                        trade_id=str(pos.id), instrument=instrument, direction=pos.direction,
+                        entry=pos.entry, exit_price=exit_price, pnl=pnl,
+                        outcome=bt_trade.outcome, tqs_grade=bt_trade.tqs_grade,
+                        entry_time=pos.entry_time, exit_time=current_bar.timestamp,
+                    ))
+                    closed_positions.append(pos)
+                    continue
+
                 action = self.monitor.update(pos, current_bar.close, current_bar)
                 if action.action != "HOLD":
                     exit_price = self._get_exit_price(pos, action, current_bar)
@@ -287,6 +355,7 @@ class BacktestEngine:
                         self.consecutive_losses = 0
                     else:
                         self.consecutive_losses += 1
+                        self.last_loss_bar = i  # v7.0: track for cooloff
 
                     bt_trade = BacktestTrade(
                         trade_id=pos.id,
@@ -337,9 +406,15 @@ class BacktestEngine:
             # 2. Check for new signals at interval
             if i % self.config.signal_interval_bars != 0:
                 continue
-            if len(self.open_positions) >= 2:
+            # v7.0: Only 1 position at a time — zero duplicate trades
+            if self.config.max_one_position and len(self.open_positions) >= 1:
+                continue
+            elif not self.config.max_one_position and len(self.open_positions) >= 2:
                 continue
             if self.consecutive_losses >= 3:
+                continue
+            # v7.0: Cooloff after a loss — wait before next trade
+            if self.config.loss_cooloff_bars > 0 and (i - self.last_loss_bar) < self.config.loss_cooloff_bars:
                 continue
             if self.daily_pnl <= -(self.balance * self.config.max_daily_loss_pct):
                 continue
@@ -509,6 +584,26 @@ class BacktestEngine:
                 signals_rejected += 1
                 continue
 
+            # v7.0 FIX 1: Reject micro-risk trades — stops too close = noise
+            risk_ticks = original_risk / tick
+            if risk_ticks < self.config.min_risk_ticks:
+                signals_rejected += 1
+                continue
+
+            # v7.5: Bullish-only mode (for confirmed bull markets)
+            if self.config.bullish_only and context.direction == "BEARISH":
+                signals_rejected += 1
+                continue
+
+            # v7.0 FIX 3: Macro trend filter — block counter-trend only in STRONG trends
+            if self.config.macro_trend_filter and context.macro_confidence >= 0.65:
+                if "TRENDING_BULLISH" in regime_label and context.direction == "BEARISH":
+                    signals_rejected += 1
+                    continue
+                if "TRENDING_BEARISH" in regime_label and context.direction == "BULLISH":
+                    signals_rejected += 1
+                    continue
+
             widened_risk = original_risk * stop_mult
             if context.direction == "BULLISH":
                 wide_stop = entry_price.price - widened_risk
@@ -531,6 +626,14 @@ class BacktestEngine:
                 tp1 = entry_price.price - original_risk * tp1_r
                 tp2 = entry_price.price - original_risk * tp2_r
                 tp3 = entry_price.price - original_risk * tp3_r
+
+            # v7.0: Minimum reward:risk filter — TP1 must justify the risk
+            tp1_distance = abs(tp1 - entry_price.price)
+            widened_risk = abs(entry_price.price - wide_stop)
+            actual_rr = tp1_distance / widened_risk if widened_risk > 0 else 0
+            if actual_rr < self.config.min_rr_ratio:
+                signals_rejected += 1
+                continue
 
             # 8. Position sizing — use widened stop for sizing
             size = self.sizer.calculate(
